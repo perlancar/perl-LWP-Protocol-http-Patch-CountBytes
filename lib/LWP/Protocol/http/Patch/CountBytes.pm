@@ -38,44 +38,96 @@ sub _patch_socket_pkg {
 
     return if $package_already_patched{$pkg}++;
 
-    my $orig_send_exists = exists &{"$pkg\::send"};
-    my $orig_send        = \&{"$pkg\::send"};
-    my $orig_recv_exists = exists &{"$pkg\::recv"};
-    my $orig_recv        = \&{"$pkg\::recv"};
-
     say "D:patching $pkg\::send ...";
-    *{"$pkg\::send"} = sub {
-        my $self = $_[0];
-        my $bytes_actually_sent;
+    {
+        my $orig_send_exists = exists &{"$pkg\::send"};
+        my $orig_send        = \&{"$pkg\::send"};
+        *{"$pkg\::send"} = sub {
+            my $self = $_[0];
+            my $bytes_actually_sent;
 
-        if ($orig_send_exists) {
-            # XXX by default socket returns number of bytes sent, but if it has
-            # been binmode()-ed, it will return number of characters instead. we
-            # haven't handled this.
-            $bytes_actually_sent = $orig_send->(@_);
-        } else {
-            shift;
-            $bytes_actually_sent = $self->SUPER::send(@_);
-        }
-        $bytes_out += $bytes_actually_sent
-            if 1||$sock_objs{refaddr $self}; # this only counts sockets used by LWP
-        $bytes_actually_sent;
-    };
+            if ($orig_send_exists) {
+                # XXX by default socket returns number of bytes sent, but if it
+                # has been binmode()-ed, it will return number of characters
+                # instead. we haven't handled this.
+                $bytes_actually_sent = $orig_send->(@_);
+            } else {
+                shift;
+                $bytes_actually_sent = $self->SUPER::send(@_);
+            }
+            $bytes_out += $bytes_actually_sent
+                # this only counts sockets used by LWP
+                if $sock_objs{refaddr $self};
+            $bytes_actually_sent;
+        };
+    }
 
     say "D:patching $pkg\::recv ...";
-    *{"$pkg\::recv"} = sub {
-        my ($self, $scalar, $len, $flags) = @_;
+    {
+        my $orig_recv_exists = exists &{"$pkg\::recv"};
+        my $orig_recv        = \&{"$pkg\::recv"};
+        *{"$pkg\::recv"} = sub {
+            my ($self, $scalar, $len, $flags) = @_;
 
-        my $res;
-        if ($orig_recv_exists) {
-            $res = $orig_recv->($self, $scalar, $len, $flags);
-        } else {
-            $res = $self->SUPER::recv($scalar, $len, $flags);
-        }
-        $bytes_in += _get_byte_size($scalar)
-            if 1||$sock_objs{refaddr $self}; # this only counts sockets used by LWP
-        $res;
-    };
+            my $res;
+            if ($orig_recv_exists) {
+                $res = $orig_recv->($self, $scalar, $len, $flags);
+            } else {
+                $res = $self->SUPER::recv($scalar, $len, $flags);
+            }
+            $bytes_in += _get_byte_size($scalar)
+                # this only counts sockets used by LWP
+                if $sock_objs{refaddr $self};
+            $res;
+        };
+    }
+
+    say "D:patching $pkg\::sysread ...";
+    {
+        my $orig_sysread_exists = exists &{"$pkg\::sysread"};
+        my $orig_sysread        = \&{"$pkg\::sysread"};
+        *{"$pkg\::sysread"} = sub {
+            my ($self, $scalar, $len, $offset) = @_;
+
+            say "D:sysread ...";
+            my $bytes_actually_read;
+            if ($orig_sysread_exists) {
+                $bytes_actually_read =
+                    $orig_sysread->($self, $scalar, $len, $offset);
+            } else {
+                $bytes_actually_read = $self->SUPER::sysread(
+                    $scalar, $len, $offset);
+            }
+            $bytes_in += $bytes_actually_read
+                # this only counts sockets used by LWP
+                if $sock_objs{refaddr $self};
+            $bytes_actually_read;
+        };
+    }
+
+    say "D:patching $pkg\::syswrite ...";
+    {
+        my $orig_syswrite_exists = exists &{"$pkg\::syswrite"};
+        my $orig_syswrite        = \&{"$pkg\::syswrite"};
+        *{"$pkg\::syswrite"} = sub {
+            my $self = $_[0];
+
+            say "D:syswrite ...";
+            my $bytes_actually_written;
+            if ($orig_syswrite_exists) {
+                $bytes_actually_written =
+                    $orig_syswrite->(@_);
+            } else {
+                shift;
+                $bytes_actually_written =
+                    $self->SUPER::syswrite(@_);
+            }
+            $bytes_out += $bytes_actually_written
+                # this only counts sockets used by LWP
+                if $sock_objs{refaddr $self};
+            $bytes_actually_written;
+        };
+    }
 }
 
 sub patch_data {
@@ -103,7 +155,7 @@ sub patch_data {
                         _patch_socket_pkg($sock_pkg);
                     }
                     $sock_objs{refaddr $sock}++;
-                    $sock->send("test");
+                    $sock->syswrite("test");
                     $sock;
                 },
             },
